@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../Dockerfile.backend
+    container_name: dj-backend
+    restart: unless-stopped
+    environment:
+      MUSIC_DIR: /app/songs
+    volumes:
+      # Mount your local music folder (read-only for safety)
+      - ./backend/songs:/app/songs:ro
+      # Persist SQLite DB
+      - dj-db:/app/data
+    # SQLite lives on the volume; override the default DB path
+    command: >
+      sh -c "export DB_PATH=/app/data/dj.db && uvicorn main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    networks:
+      - dj-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../Dockerfile.frontend
+    container_name: dj-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+    networks:
+      - dj-net
+
+volumes:
+  dj-db:
+
+networks:
+  dj-net:
+    driver: bridge
