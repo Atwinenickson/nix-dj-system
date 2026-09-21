@@ -592,3 +592,100 @@ def playlist_tracks(name: str):
             ORDER BY pt.position
         """, (pid,)).fetchall()
         return [dict(r) for r in rows]
+
+
+from collections import Counter
+import re
+
+# ------------------------------------------------------------------
+# Side-by-side capsule comparison
+# ------------------------------------------------------------------
+@app.get("/api/capsule/compare")
+def capsule_compare(
+    a_start: int = 365,  # "not played in last A_START days"
+    a_end:   int = 730,  # "but played within last A_END days"
+    b_start: int = 180,
+    b_end:   int = 365,
+    limit:   int = 25,
+):
+    """
+    Returns two lists side-by-side.
+    Column A: tracks not played in last `a_start` days but played within `a_end` days.
+    Column B: same for `b_start`/`b_end`.
+    """
+    def window(start, end):
+        with db() as conn:
+            rows = conn.execute("""
+                SELECT t.*, MAX(h.played_at) AS last_played, COUNT(h.id) AS plays
+                FROM tracks t JOIN history h ON h.track_id = t.id
+                GROUP BY t.id
+                HAVING last_played <  datetime('now', ?)
+                   AND last_played >= datetime('now', ?)
+                ORDER BY plays DESC, last_played ASC
+                LIMIT ?
+            """, (f"-{start} days", f"-{end} days", limit)).fetchall()
+            return [dict(r) for r in rows]
+
+    return {
+        "a": {"start": a_start, "end": a_end, "label": f"{a_start}d–{a_end}d ago", "tracks": window(a_start, a_end)},
+        "b": {"start": b_start, "end": b_end, "label": f"{b_start}d–{b_end}d ago", "tracks": window(b_start, b_end)},
+    }
+
+
+# ------------------------------------------------------------------
+# Auto-generate a name for a mix
+# ------------------------------------------------------------------
+@app.post("/api/capsule/auto-name")
+def capsule_auto_name(track_ids: list[int] = Body(..., embed=True)):
+    """
+    Given a list of track IDs, produce a catchy mix name based on
+    dominant artist and/or genre.
+    """
+    if not track_ids:
+        return {"name": f"Capsule Mix · {datetime.utcnow().strftime('%b %Y')}"}
+
+    placeholders = ",".join("?" for _ in track_ids)
+    with db() as conn:
+        rows = conn.execute(
+            f"SELECT artist, genre, album, title FROM tracks WHERE id IN ({placeholders})",
+            track_ids,
+        ).fetchall()
+
+    artists = Counter((r["artist"] or "").strip() for r in rows if r["artist"])
+    genres  = Counter((r["genre"]  or "").strip() for r in rows if r["genre"])
+    albums  = Counter((r["album"]  or "").strip() for r in rows if r["album"])
+
+    top_artist, artist_count = artists.most_common(1)[0] if artists else ("", 0)
+    top_genre,  genre_count  = genres.most_common(1)[0]  if genres  else ("", 0)
+    top_album,  album_count  = albums.most_common(1)[0]  if albums  else ("", 0)
+
+    total = len(rows)
+    date_tag = datetime.utcnow().strftime("%b %Y")
+
+    # Decide on a naming strategy
+    if artist_count / max(total, 1) >= 0.4:
+        # Dominant artist
+        name = f"{top_artist} Heavy · {date_tag}"
+    elif genre_count / max(total, 1) >= 0.4:
+        # Dominant genre
+        name = f"{top_genre.title()} Vibes · {date_tag}"
+    elif album_count / max(total, 1) >= 0.5:
+        # Mostly one album
+        name = f"{top_album} Session · {date_tag}"
+    elif len(artists) <= 3 and total >= 5:
+        # Few artists
+        top2 = " & ".join(a for a, _ in artists.most_common(2))
+        name = f"{top2} Mix · {date_tag}"
+    else:
+        # Mixed bag — describe by vibe
+        adjectives = ["Late Night", "Sunset", "Midnight", "Sunday", "Golden Hour", "Autumn", "Velvet", "Analog"]
+        import random as _r
+        name = f"{_r.choice(adjectives)} Capsule · {total} tracks"
+
+    return {
+        "name": name,
+        "dominant_artist": top_artist,
+        "dominant_genre": top_genre,
+        "artist_share": round(artist_count / max(total, 1), 2),
+        "genre_share": round(genre_count / max(total, 1), 2),
+    }

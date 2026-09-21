@@ -28,7 +28,7 @@
 
           <button
             v-if="tracks.length"
-            @click="queueAll"
+            @click="queueAll(tracks)"
             class="bg-white/20 hover:bg-white/30 rounded-full px-4 py-1.5 font-semibold text-sm backdrop-blur"
           >➕ Queue mix</button>
 
@@ -43,10 +43,18 @@
             @click="openSaveDialog"
             class="bg-pink-500 hover:bg-pink-400 text-white rounded-full px-4 py-1.5 font-semibold text-sm"
           >💾 Save as playlist</button>
+
+          <button
+            @click="toggleCompare"
+            :class="compareMode
+              ? 'bg-indigo-500 text-white'
+              : 'bg-white/20 hover:bg-white/30 text-white'"
+            class="rounded-full px-4 py-1.5 font-semibold text-sm backdrop-blur"
+          >🔬 {{ compareMode ? 'Exit compare' : 'Compare windows' }}</button>
         </div>
       </div>
 
-      <!-- Dev tools (small, right corner) -->
+      <!-- Dev tools (hover-visible, top-right of banner) -->
       <div class="absolute top-3 right-3 flex gap-2 opacity-40 hover:opacity-100 transition">
         <button
           @click="seed"
@@ -62,7 +70,7 @@
     </div>
 
     <!-- ===================== Auto-scroll preview strip ===================== -->
-    <section v-if="tracks.length" class="mx-4 mb-6">
+    <section v-if="tracks.length && !compareMode" class="mx-4 mb-6">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-sm uppercase tracking-widest text-zinc-400">
           🎞️ Preview · {{ tracks.length }} tracks
@@ -81,7 +89,7 @@
         class="flex gap-3 overflow-x-auto scroll-smooth pb-3 scrollbar-hide"
       >
         <div
-          v-for="(t, i) in tracks" :key="'pv-'+t.id"
+          v-for="(t, i) in tracks" :key="'pv-' + t.id"
           @click="player.play(t)"
           :ref="el => setStripRef(el, i)"
           class="shrink-0 w-32 cursor-pointer group"
@@ -100,7 +108,6 @@
               :style="{ background: gradientFor(t.artist) }"
             >{{ initials(t.artist) }}</div>
 
-            <!-- Playing overlay -->
             <div
               v-if="player.current?.id === t.id"
               class="absolute inset-0 bg-black/40 flex items-center justify-center"
@@ -108,7 +115,6 @@
               <div class="text-2xl text-green-400 animate-pulse">▶</div>
             </div>
 
-            <!-- Duration badge -->
             <div class="absolute bottom-1 right-1 bg-black/70 rounded px-1.5 py-0.5 text-[10px] text-white">
               {{ fmt(t.duration) }}
             </div>
@@ -119,8 +125,135 @@
       </div>
     </section>
 
-    <!-- ===================== Filters ===================== -->
-    <div class="mx-4 mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <!-- ===================== COMPARE MODE ===================== -->
+    <section v-if="compareMode" class="mx-4 mb-6">
+      <!-- Window picker -->
+      <div class="rounded-2xl bg-zinc-900 border border-zinc-800 p-5 mb-4">
+        <h2 class="text-sm uppercase tracking-widest text-zinc-400 mb-4">
+          🔬 Compare two time windows
+        </h2>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Left window -->
+          <div>
+            <div class="text-xs uppercase text-cyan-400 mb-2">Left window</div>
+            <div class="grid grid-cols-3 gap-2">
+              <button
+                v-for="w in comparePresets" :key="'a-' + w.id"
+                @click="compareA = w.id; loadCompare()"
+                :class="compareA === w.id
+                  ? 'bg-cyan-500 text-black font-semibold'
+                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'"
+                class="rounded-lg py-2 text-xs"
+              >{{ w.label }}</button>
+            </div>
+          </div>
+
+          <!-- Right window -->
+          <div>
+            <div class="text-xs uppercase text-pink-400 mb-2">Right window</div>
+            <div class="grid grid-cols-3 gap-2">
+              <button
+                v-for="w in comparePresets" :key="'b-' + w.id"
+                @click="compareB = w.id; loadCompare()"
+                :class="compareB === w.id
+                  ? 'bg-pink-500 text-black font-semibold'
+                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'"
+                class="rounded-lg py-2 text-xs"
+              >{{ w.label }}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Side-by-side results -->
+      <div v-if="compareData" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Left column -->
+        <div class="rounded-2xl bg-zinc-900/60 border border-cyan-500/30 p-4">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-cyan-400">
+                {{ compareData.a.label }}
+              </div>
+              <div class="text-sm text-zinc-400">
+                {{ compareData.a.tracks.length }} tracks
+                · {{ fmtTotal(compareDuration(compareData.a.tracks)) }}
+              </div>
+            </div>
+            <button
+              v-if="compareData.a.tracks.length"
+              @click="queueAll(compareData.a.tracks)"
+              class="text-xs bg-cyan-500 hover:bg-cyan-400 text-black rounded-full px-3 py-1"
+            >➕ Queue</button>
+          </div>
+          <ul class="space-y-1 max-h-96 overflow-y-auto">
+            <li
+              v-for="t in compareData.a.tracks" :key="'a-' + t.id"
+              class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-zinc-800 group"
+            >
+              <div class="w-9 h-9 rounded overflow-hidden shrink-0 bg-zinc-800">
+                <img v-if="!broken[t.id]" :src="`/api/art/${t.id}`"
+                     class="w-full h-full object-cover" @error="broken[t.id] = true" />
+                <div v-else class="w-full h-full flex items-center justify-center text-[10px] font-bold text-white"
+                     :style="{ background: gradientFor(t.artist) }">{{ initials(t.artist) }}</div>
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="text-sm truncate">{{ t.title }}</div>
+                <div class="text-[10px] text-zinc-500 truncate">{{ t.artist }}</div>
+              </div>
+              <button @click="player.play(t)" class="text-green-400 opacity-0 group-hover:opacity-100">▶</button>
+            </li>
+            <li v-if="!compareData.a.tracks.length" class="text-xs text-zinc-500 py-4 text-center">
+              No tracks in this window
+            </li>
+          </ul>
+        </div>
+
+        <!-- Right column -->
+        <div class="rounded-2xl bg-zinc-900/60 border border-pink-500/30 p-4">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <div class="text-xs uppercase tracking-widest text-pink-400">
+                {{ compareData.b.label }}
+              </div>
+              <div class="text-sm text-zinc-400">
+                {{ compareData.b.tracks.length }} tracks
+                · {{ fmtTotal(compareDuration(compareData.b.tracks)) }}
+              </div>
+            </div>
+            <button
+              v-if="compareData.b.tracks.length"
+              @click="queueAll(compareData.b.tracks)"
+              class="text-xs bg-pink-500 hover:bg-pink-400 text-black rounded-full px-3 py-1"
+            >➕ Queue</button>
+          </div>
+          <ul class="space-y-1 max-h-96 overflow-y-auto">
+            <li
+              v-for="t in compareData.b.tracks" :key="'b-' + t.id"
+              class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-zinc-800 group"
+            >
+              <div class="w-9 h-9 rounded overflow-hidden shrink-0 bg-zinc-800">
+                <img v-if="!broken[t.id]" :src="`/api/art/${t.id}`"
+                     class="w-full h-full object-cover" @error="broken[t.id] = true" />
+                <div v-else class="w-full h-full flex items-center justify-center text-[10px] font-bold text-white"
+                     :style="{ background: gradientFor(t.artist) }">{{ initials(t.artist) }}</div>
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="text-sm truncate">{{ t.title }}</div>
+                <div class="text-[10px] text-zinc-500 truncate">{{ t.artist }}</div>
+              </div>
+              <button @click="player.play(t)" class="text-green-400 opacity-0 group-hover:opacity-100">▶</button>
+            </li>
+            <li v-if="!compareData.b.tracks.length" class="text-xs text-zinc-500 py-4 text-center">
+              No tracks in this window
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== NORMAL MODE FILTERS ===================== -->
+    <div v-if="!compareMode" class="mx-4 mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
 
       <!-- Time window -->
       <section class="rounded-2xl bg-zinc-900 border border-zinc-800 p-5">
@@ -176,13 +309,13 @@
       </section>
     </div>
 
-    <!-- ===================== Loading / Empty ===================== -->
-    <div v-if="loading" class="mx-4 text-center py-12 text-zinc-500">
+    <!-- ===================== LOADING / EMPTY ===================== -->
+    <div v-if="loading && !compareMode" class="mx-4 text-center py-12 text-zinc-500">
       <div class="inline-block w-6 h-6 border-2 border-zinc-600 border-t-amber-400 rounded-full animate-spin"></div>
       <div class="mt-3 text-sm">Digging through your history…</div>
     </div>
 
-    <div v-else-if="!tracks.length" class="mx-4 text-center py-16">
+    <div v-else-if="!tracks.length && !compareMode" class="mx-4 text-center py-16">
       <div class="text-6xl mb-4 opacity-40">🕰️</div>
       <div class="text-zinc-400">Nothing in your capsule yet</div>
       <div class="text-zinc-600 text-sm mt-1">
@@ -190,8 +323,8 @@
       </div>
     </div>
 
-    <!-- ===================== Full list ===================== -->
-    <div v-else class="mx-4">
+    <!-- ===================== NORMAL LIST ===================== -->
+    <div v-else-if="!compareMode" class="mx-4">
       <div class="text-xs uppercase tracking-widest text-zinc-500 mb-3">
         {{ tracks.length }} memories · {{ fmtTotal(tracksDuration) }}
       </div>
@@ -251,7 +384,7 @@
       </ul>
     </div>
 
-    <!-- ===================== Save dialog ===================== -->
+    <!-- ===================== SAVE-AS-PLAYLIST MODAL ===================== -->
     <div
       v-if="saveDialog"
       class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
@@ -262,13 +395,33 @@
         <p class="text-zinc-400 text-sm mb-4">
           {{ tracks.length }} tracks · {{ fmtTotal(tracksDuration) }}
         </p>
-        <input
-          v-model="playlistName"
-          placeholder="Playlist name (e.g. 'Late Night 90s')"
-          class="w-full bg-zinc-800 rounded-lg px-4 py-3 outline-none
-                 focus:ring-2 ring-pink-500 mb-4"
-          @keyup.enter="saveMix"
-        />
+
+        <div class="flex gap-2 mb-3">
+          <input
+            v-model="playlistName"
+            placeholder="Playlist name (e.g. 'Late Night 90s')"
+            class="flex-1 bg-zinc-800 rounded-lg px-4 py-3 outline-none
+                   focus:ring-2 ring-pink-500"
+            @keyup.enter="saveMix"
+          />
+          <button
+            @click="autoName"
+            class="bg-purple-600 hover:bg-purple-500 text-white px-4 py-3 rounded-lg font-semibold whitespace-nowrap"
+            title="Auto-generate name from track mix"
+          >🎲 Auto-name</button>
+        </div>
+
+        <div v-if="autoNameInfo" class="text-xs text-zinc-400 mb-4 flex flex-wrap gap-3">
+          <span v-if="autoNameInfo.dominant_artist">
+            🎤 Top artist: <b class="text-zinc-200">{{ autoNameInfo.dominant_artist }}</b>
+            ({{ Math.round(autoNameInfo.artist_share * 100) }}%)
+          </span>
+          <span v-if="autoNameInfo.dominant_genre">
+            🎵 Top genre: <b class="text-zinc-200">{{ autoNameInfo.dominant_genre }}</b>
+            ({{ Math.round(autoNameInfo.genre_share * 100) }}%)
+          </span>
+        </div>
+
         <div class="flex justify-end gap-2">
           <button
             @click="saveDialog = false"
@@ -286,15 +439,17 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { usePlayer } from '../stores/player'
 
 const player = usePlayer()
+
+// ---- State ----
 const tracks = ref([])
 const broken = reactive({})
 const loading = ref(false)
 
-// Time window
+// ---- Time window filters ----
 const ranges = [
   { id: 'day',   label: 'Today',      days: 1,    emoji: '☀️' },
   { id: 'week',  label: 'This Week',  days: 7,    emoji: '📅' },
@@ -314,17 +469,20 @@ function setRange(r) {
   load()
 }
 
-// Mix length
+// ---- Mix length ----
 const targetMinutes = ref(0)
 const mixPresets = [
-  { v: 0, l: 'Any' }, { v: 10, l: '10m' },
-  { v: 30, l: '30m' }, { v: 60, l: '1h' }, { v: 120, l: '2h' },
+  { v: 0,   l: 'Any' },
+  { v: 10,  l: '10m' },
+  { v: 30,  l: '30m' },
+  { v: 60,  l: '1h' },
+  { v: 120, l: '2h' },
 ]
 const mixLabel = computed(() =>
   targetMinutes.value === 0 ? 'Any length' : fmtTotal(targetMinutes.value * 60)
 )
 
-// Auto-scroll preview strip
+// ---- Auto-scroll strip ----
 const stripEl = ref(null)
 const autoScrolling = ref(false)
 let autoScrollTimer = null
@@ -334,12 +492,10 @@ const stripRefs = []
 function setStripRef(el, i) {
   if (el) stripRefs[i] = el
 }
-
 function startAutoScroll() {
   stopAutoScroll()
   autoScrollTimer = setInterval(() => {
-    const strip = stripEl.value
-    if (!strip || !stripRefs.length) return
+    if (!stripRefs.length) return
     autoScrollIndex = (autoScrollIndex + 1) % stripRefs.length
     const el = stripRefs[autoScrollIndex]
     if (el?.scrollIntoView) {
@@ -351,15 +507,57 @@ function stopAutoScroll() {
   clearInterval(autoScrollTimer)
   autoScrollTimer = null
 }
+watch(autoScrolling, on => { on ? startAutoScroll() : stopAutoScroll() })
 
-// Watch autoScrolling toggle
-import { watch } from 'vue'
-watch(autoScrolling, on => {
-  if (on) startAutoScroll()
-  else stopAutoScroll()
-})
+// ---- Compare mode ----
+const compareMode = ref(false)
+const compareData = ref(null)
+const compareA = ref('1y')
+const compareB = ref('6mo')
 
-// Fetch
+const comparePresets = [
+  { id: 'week',  label: '1w',  start: 7,    end: 30 },
+  { id: 'month', label: '1mo', start: 30,   end: 90 },
+  { id: '3mo',   label: '3mo', start: 90,   end: 180 },
+  { id: '6mo',   label: '6mo', start: 180,  end: 365 },
+  { id: '1y',    label: '1y',  start: 365,  end: 730 },
+  { id: '2y',    label: '2y+', start: 730,  end: 3650 },
+]
+
+function toggleCompare() {
+  compareMode.value = !compareMode.value
+  if (compareMode.value) {
+    stopAutoScroll()
+    autoScrolling.value = false
+    loadCompare()
+  }
+}
+
+function findPreset(id) {
+  return comparePresets.find(p => p.id === id) || comparePresets[4]
+}
+
+async function loadCompare() {
+  const A = findPreset(compareA.value)
+  const B = findPreset(compareB.value)
+  try {
+    const params = new URLSearchParams({
+      a_start: A.start, a_end: A.end,
+      b_start: B.start, b_end: B.end,
+      limit: 25,
+    })
+    const r = await fetch(`/api/capsule/compare?${params}`)
+    compareData.value = r.ok ? await r.json() : null
+  } catch {
+    compareData.value = null
+  }
+}
+
+function compareDuration(list) {
+  return list.reduce((s, t) => s + (t.duration || 0), 0)
+}
+
+// ---- Fetch main capsule ----
 async function load() {
   loading.value = true
   try {
@@ -372,6 +570,7 @@ async function load() {
     const r = await fetch(`/api/capsule?${params}`)
     tracks.value = r.ok ? await r.json() : []
     autoScrollIndex = 0
+    stripRefs.length = 0
   } catch {
     tracks.value = []
   } finally {
@@ -382,9 +581,10 @@ async function load() {
 onMounted(load)
 onUnmounted(stopAutoScroll)
 
-// Bulk actions
-function queueAll() {
-  tracks.value.forEach(t => player.enqueue(t))
+// ---- Bulk actions ----
+function queueAll(list) {
+  const src = Array.isArray(list) ? list : tracks.value
+  src.forEach(t => player.enqueue(t))
 }
 function playAll() {
   if (!tracks.value.length) return
@@ -393,15 +593,31 @@ function playAll() {
   player.play(first)
 }
 
-// Save as playlist
+// ---- Save as playlist ----
 const saveDialog = ref(false)
 const playlistName = ref('')
 const saving = ref(false)
+const autoNameInfo = ref(null)
 
 function openSaveDialog() {
-  const defaultName = `Capsule · ${new Date().toLocaleDateString()}`
-  playlistName.value = defaultName
+  playlistName.value = `Capsule · ${new Date().toLocaleDateString()}`
+  autoNameInfo.value = null
   saveDialog.value = true
+}
+
+async function autoName() {
+  if (!tracks.value.length) return
+  try {
+    const r = await fetch('/api/capsule/auto-name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ track_ids: tracks.value.map(t => t.id) }),
+    })
+    if (!r.ok) return
+    const data = await r.json()
+    playlistName.value = data.name
+    autoNameInfo.value = data
+  } catch {}
 }
 
 async function saveMix() {
@@ -409,16 +625,16 @@ async function saveMix() {
   saving.value = true
   try {
     const trackIds = tracks.value.map(t => t.id)
-    const r = await fetch(`/api/playlists/${encodeURIComponent(playlistName.value)}/bulk`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ track_ids: trackIds }),
-    })
-    if (r.ok) {
-      saveDialog.value = false
-    } else {
-      alert('Failed to save playlist')
-    }
+    const r = await fetch(
+      `/api/playlists/${encodeURIComponent(playlistName.value)}/bulk`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ track_ids: trackIds }),
+      }
+    )
+    if (r.ok) saveDialog.value = false
+    else alert('Failed to save playlist')
   } catch {
     alert('Failed to save playlist')
   } finally {
@@ -426,7 +642,7 @@ async function saveMix() {
   }
 }
 
-// DEV: seed history
+// ---- DEV: seed / clear history ----
 async function seed() {
   loading.value = true
   try {
@@ -443,10 +659,11 @@ async function clearHistory() {
   } catch {}
 }
 
-// Totals & helpers
+// ---- Totals & formatting ----
 const tracksDuration = computed(() =>
   tracks.value.reduce((sum, t) => sum + (t.duration || 0), 0)
 )
+
 const fmt = s => {
   if (!s || isNaN(s)) return '—'
   const m = Math.floor(s / 60)
