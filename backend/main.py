@@ -456,3 +456,139 @@ def top_artists(limit: int = 12):
             LIMIT ?
         """, (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+@app.get("/api/capsule")
+def capsule(
+    days_ago_start: int = 30,
+    days_ago_end: int = 3650,
+    min_plays: int = 1,
+    limit: int = 50,
+    target_minutes: int = 0,
+):
+    """
+    Nostalgic playlist: tracks you loved before but haven't played recently.
+
+    - days_ago_start: only include tracks NOT played in the last N days
+    - days_ago_end: only include tracks played within the last M days (optional upper bound)
+    - min_plays: ignore tracks played fewer than N times
+    - limit: max number of tracks returned
+    - target_minutes: if > 0, stop collecting once total duration reaches this many minutes
+    """
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT t.*, MAX(h.played_at) as last_played, COUNT(h.id) as plays
+            FROM tracks t JOIN history h ON h.track_id = t.id
+            GROUP BY t.id
+            HAVING plays >= ?
+               AND last_played <  datetime('now', ?)
+               AND last_played >= datetime('now', ?)
+            ORDER BY plays DESC, last_played ASC
+            LIMIT ?
+        """, (
+            min_plays,
+            f"-{days_ago_start} days",
+            f"-{days_ago_end} days",
+            limit,
+        )).fetchall()
+
+    result = [dict(r) for r in rows]
+
+    # If a target duration is set, trim the list to fit
+    if target_minutes > 0:
+        budget = target_minutes * 60
+        trimmed = []
+        total = 0
+        for t in result:
+            d = t.get("duration") or 0
+            if total + d > budget and trimmed:
+                break
+            trimmed.append(t)
+            total += d
+        result = trimmed
+
+    return result
+
+
+from fastapi import Body
+
+# ------------------------------------------------------------------
+# DEV: seed fake history for testing
+# ------------------------------------------------------------------
+@app.post("/api/dev/seed-history")
+def seed_history(count: int = 40, spread_days: int = 400):
+    """
+    DEV ONLY. Randomly assigns N tracks fake play history spread over the
+    last `spread_days` days, so Capsule has something to show.
+    """
+    import random
+    with db() as conn:
+        tracks = conn.execute("SELECT id FROM tracks ORDER BY RANDOM() LIMIT ?", (count,)).fetchall()
+        for row in tracks:
+            tid = row["id"]
+            plays = random.randint(1, 8)
+            for _ in range(plays):
+                days_ago = random.randint(1, spread_days)
+                conn.execute(
+                    "INSERT INTO history(track_id, played_at) VALUES(?, datetime('now', ?))",
+                    (tid, f"-{days_ago} days"),
+                )
+    return {"seeded": len(tracks)}
+
+
+@app.delete("/api/dev/clear-history")
+def clear_history():
+    """DEV ONLY. Wipe all play history."""
+    with db() as conn:
+        conn.execute("DELETE FROM history")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------
+# Save a mix as a named playlist (idempotent)
+# ------------------------------------------------------------------
+@app.post("/api/playlists/{name}/bulk")
+def save_playlist_bulk(name: str, track_ids: list[int] = Body(..., embed=True)):
+    """
+    Create a playlist (if missing) and add all track_ids in order.
+    Replaces any existing tracks in the same-named playlist.
+    """
+    if not track_ids:
+        return {"ok": True, "count": 0}
+
+    with db() as conn:
+        # Get or create playlist
+        row = conn.execute("SELECT id FROM playlists WHERE name=?", (name,)).fetchone()
+        if row:
+            pid = row["id"]
+            # Wipe existing order so this call is idempotent
+            conn.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (pid,))
+        else:
+            pid = conn.execute("INSERT INTO playlists(name) VALUES(?)", (name,)).lastrowid
+
+        # Insert in order
+        for pos, tid in enumerate(track_ids):
+            conn.execute(
+                "INSERT INTO playlist_tracks(playlist_id, track_id, position) VALUES(?,?,?)",
+                (pid, tid, pos),
+            )
+
+    return {"ok": True, "count": len(track_ids), "name": name}
+
+
+# ------------------------------------------------------------------
+# Load a playlist's tracks (needed to resume / preview)
+# ------------------------------------------------------------------
+@app.get("/api/playlists/{name}/tracks")
+def playlist_tracks(name: str):
+    with db() as conn:
+        row = conn.execute("SELECT id FROM playlists WHERE name=?", (name,)).fetchone()
+        if not row:
+            return []
+        pid = row["id"]
+        rows = conn.execute("""
+            SELECT t.* FROM playlist_tracks pt
+            JOIN tracks t ON t.id = pt.track_id
+            WHERE pt.playlist_id = ?
+            ORDER BY pt.position
+        """, (pid,)).fetchall()
+        return [dict(r) for r in rows]
