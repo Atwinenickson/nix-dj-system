@@ -5,3 +5,4 @@ sqlalchemy
 websockets
 python-multipart
 aiofiles
+httpx>=0.27

@@ -71,6 +71,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS playlist_tracks (
             playlist_id INTEGER, track_id INTEGER, position INTEGER
         );
+        CREATE TABLE IF NOT EXISTS sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            location TEXT UNIQUE NOT NULL,
+            label TEXT,
+            added_at TEXT,
+            active INTEGER DEFAULT 1
+        );
         """)
 
 init_db()
@@ -153,7 +161,13 @@ def scan_library():
 @app.on_event("startup")
 async def startup():
     print(f"🎵 MUSIC_DIRS = {[str(d) for d in MUSIC_DIRS]}", flush=True)
-    scan_library()
+    scan_library()   # env var folders (optional)
+
+    # Also ingest any persisted sources
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM sources WHERE active=1").fetchall()
+    for r in rows:
+        ingest_source(r["kind"], r["location"], r["label"] or "")
 
 # ------------------------------------------------------------------
 # Library API
@@ -181,23 +195,36 @@ def rescan():
 # Streaming (Range support for seeking)
 # ------------------------------------------------------------------
 @app.get("/api/stream/{track_id}")
-def stream(track_id: int, request: Request):
+async def stream(track_id: int, request: Request):
     with db() as conn:
         row = conn.execute("SELECT path FROM tracks WHERE id=?", (track_id,)).fetchone()
     if not row:
-        raise HTTPException(404, "track not found")
-    path = Path(row["path"])
-    if not path.exists():
-        raise HTTPException(404, "file not found")
+        raise HTTPException(404)
 
+    src = row["path"]
+
+    # --- URL track: proxy it ---
+    if src.startswith("http://") or src.startswith("https://"):
+        # If we cached it, serve from cache. Otherwise proxy upstream.
+        cached = SOURCES_CACHE / Path(src.split("?")[0]).name
+        if cached.exists():
+            return _stream_file(cached, request)
+        return await _stream_remote(src, request)
+
+    # --- Local file ---
+    return _stream_file(Path(src), request)
+
+
+def _stream_file(path: Path, request: Request):
+    if not path.exists():
+        raise HTTPException(404)
     file_size = path.stat().st_size
     range_header = request.headers.get("range")
     start, end = 0, file_size - 1
     if range_header:
-        bytes_range = range_header.replace("bytes=", "").split("-")
-        start = int(bytes_range[0]) if bytes_range[0] else 0
-        end = int(bytes_range[1]) if len(bytes_range) > 1 and bytes_range[1] else file_size - 1
-
+        b = range_header.replace("bytes=", "").split("-")
+        start = int(b[0]) if b[0] else 0
+        end = int(b[1]) if len(b) > 1 and b[1] else file_size - 1
     chunk = end - start + 1
 
     def iterfile():
@@ -211,9 +238,8 @@ def stream(track_id: int, request: Request):
                 remaining -= len(data)
                 yield data
 
-    # MIME auto-detect (.mp3 → audio/mpeg, .m4a → audio/mp4, .mp4 → video/mp4, ...)
     mime, _ = mimetypes.guess_type(str(path))
-    if not mime or not (mime.startswith("audio/") or mime.startswith("video/")):
+    if not mime:
         mime = "audio/mpeg"
 
     headers = {
@@ -222,10 +248,33 @@ def stream(track_id: int, request: Request):
         "Content-Length": str(chunk),
         "Content-Type": mime,
     }
+    return StreamingResponse(iterfile(), status_code=206 if range_header else 200, headers=headers)
+
+
+async def _stream_remote(url: str, request: Request):
+    """Proxy remote audio without downloading fully (streaming)."""
+    headers = {}
+    if "range" in request.headers:
+        headers["range"] = request.headers["range"]
+
+    client = httpx.AsyncClient(timeout=None)
+    req = client.build_request("GET", url, headers=headers)
+    resp = await client.send(req, stream=True)
+
+    async def iterator():
+        async for chunk in resp.aiter_bytes(1024 * 256):
+            yield chunk
+        await resp.aclose()
+        await client.aclose()
+
+    passthrough = {
+        k: v for k, v in resp.headers.items()
+        if k.lower() in {"content-type", "content-length", "content-range", "accept-ranges"}
+    }
     return StreamingResponse(
-        iterfile(),
-        status_code=206 if range_header else 200,
-        headers=headers,
+        iterator(),
+        status_code=resp.status_code,
+        headers=passthrough,
     )
 
 # ------------------------------------------------------------------
@@ -689,3 +738,195 @@ def capsule_auto_name(track_ids: list[int] = Body(..., embed=True)):
         "artist_share": round(artist_count / max(total, 1), 2),
         "genre_share": round(genre_count / max(total, 1), 2),
     }
+
+
+import mimetypes
+import httpx
+from fastapi import Body
+from datetime import datetime
+
+SOURCES_CACHE = Path("source_cache")
+SOURCES_CACHE.mkdir(exist_ok=True)
+
+# ---------- List / add / remove sources ----------
+@app.get("/api/sources")
+def list_sources():
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM sources ORDER BY added_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.post("/api/sources")
+def add_source(payload: dict = Body(...)):
+    """
+    payload = {
+      "kind": "folder" | "file" | "url" | "stream",
+      "location": "...",
+      "label": "optional"
+    }
+    """
+    kind = (payload.get("kind") or "").strip()
+    loc  = (payload.get("location") or "").strip()
+    label = (payload.get("label") or "").strip()
+
+    if kind not in {"folder", "file", "url", "stream"}:
+        raise HTTPException(400, "invalid kind")
+    if not loc:
+        raise HTTPException(400, "location required")
+
+    # Validate local paths
+    if kind in {"folder", "file"}:
+        p = Path(loc).expanduser().resolve()
+        if not p.exists():
+            raise HTTPException(400, f"path not found: {p}")
+        if kind == "folder" and not p.is_dir():
+            raise HTTPException(400, "not a directory")
+        if kind == "file" and not p.is_file():
+            raise HTTPException(400, "not a file")
+        loc = str(p)
+
+    # Validate URLs
+    if kind in {"url", "stream"}:
+        if not (loc.startswith("http://") or loc.startswith("https://")):
+            raise HTTPException(400, "URL must start with http(s)://")
+
+    with db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO sources(kind,location,label,added_at) VALUES(?,?,?,?)",
+                (kind, loc, label, datetime.utcnow().isoformat()),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(400, "source already exists")
+
+    # Immediately ingest
+    added = ingest_source(kind, loc, label)
+    return {"ok": True, "added": added}
+
+
+@app.delete("/api/sources/{source_id}")
+def delete_source(source_id: int):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
+        if not row:
+            raise HTTPException(404)
+        loc = row["location"]
+        conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
+        # Remove any tracks associated with this source
+        conn.execute("DELETE FROM tracks WHERE path LIKE ?", (f"%{loc}%",))
+    return {"ok": True}
+
+
+# ---------- Ingest a source ----------
+def ingest_source(kind: str, location: str, label: str = "") -> int:
+    """
+    Add tracks from this source to the library.
+    Returns number of tracks added.
+    """
+    if kind == "folder":
+        return _ingest_folder(Path(location))
+    if kind == "file":
+        return _ingest_file(Path(location))
+    if kind == "url":
+        return _ingest_url(location, label)
+    if kind == "stream":
+        return _ingest_stream(location, label)
+    return 0
+
+
+def _ingest_folder(base: Path) -> int:
+    added = 0
+    with db() as conn:
+        for root, _, files in os.walk(base):
+            for f in files:
+                if not _is_audio_file(f):
+                    continue
+                full = str(Path(root) / f)
+                if conn.execute("SELECT 1 FROM tracks WHERE path=?", (full,)).fetchone():
+                    continue
+                meta = _extract_meta(full, Path(f).stem)
+                conn.execute(
+                    "INSERT INTO tracks(path,title,artist,album,duration,genre,added_at) VALUES(?,?,?,?,?,?,?)",
+                    (full, meta["title"], meta["artist"], meta["album"], meta["duration"],
+                     meta["genre"], datetime.utcnow().isoformat()),
+                )
+                added += 1
+    return added
+
+
+def _ingest_file(path: Path) -> int:
+    if not path.is_file() or not _is_audio_file(path.name):
+        return 0
+    full = str(path)
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM tracks WHERE path=?", (full,)).fetchone():
+            return 0
+        meta = _extract_meta(full, path.stem)
+        conn.execute(
+            "INSERT INTO tracks(path,title,artist,album,duration,genre,added_at) VALUES(?,?,?,?,?,?,?)",
+            (full, meta["title"], meta["artist"], meta["album"], meta["duration"],
+             meta["genre"], datetime.utcnow().isoformat()),
+        )
+    return 1
+
+
+def _ingest_url(url: str, label: str = "") -> int:
+    """
+    Download the file to source_cache and register it.
+    Reuses cache if the file exists.
+    """
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM tracks WHERE path=?", (url,)).fetchone():
+            return 0
+
+    name = label or Path(url.split("?")[0]).name or "download"
+    if "." not in name:
+        name += ".mp3"
+
+    cached = SOURCES_CACHE / name
+    if not cached.exists():
+        try:
+            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as r:
+                r.raise_for_status()
+                with open(cached, "wb") as f:
+                    for chunk in r.iter_bytes(1024 * 256):
+                        f.write(chunk)
+        except Exception as e:
+            print(f"⚠️  failed to download {url}: {e}")
+            return 0
+
+    meta = _extract_meta(str(cached), cached.stem)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO tracks(path,title,artist,album,duration,genre,added_at) VALUES(?,?,?,?,?,?,?)",
+            (url, meta["title"], meta["artist"], meta["album"], meta["duration"],
+             meta["genre"], datetime.utcnow().isoformat()),
+        )
+    return 1
+
+
+def _ingest_stream(url: str, label: str = "") -> int:
+    """Register a live stream as a single endless track."""
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM tracks WHERE path=?", (url,)).fetchone():
+            return 0
+        conn.execute(
+            "INSERT INTO tracks(path,title,artist,album,duration,genre,added_at) VALUES(?,?,?,?,?,?,?)",
+            (url, label or "Live Stream", "Radio", "", 0, "stream",
+             datetime.utcnow().isoformat()),
+        )
+    return 1
+
+
+def _extract_meta(full_path: str, fallback_title: str) -> dict:
+    try:
+        audio = MutagenFile(full_path, easy=True)
+        return {
+            "title":  (audio.get("title")  or [fallback_title])[0],
+            "artist": (audio.get("artist") or ["Unknown"])[0],
+            "album":  (audio.get("album")  or [""])[0],
+            "genre":  (audio.get("genre")  or [""])[0],
+            "duration": audio.info.length if audio and audio.info else 0,
+        }
+    except Exception:
+        return {"title": fallback_title, "artist": "Unknown", "album": "", "genre": "", "duration": 0}

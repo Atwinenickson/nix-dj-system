@@ -47,6 +47,7 @@
       <Capsule    v-else-if="tab==='capsule'" />
       <Queue      v-else-if="tab==='queue'" />
       <DjControls v-else-if="tab==='dj'" />
+      <Sources v-else-if="tab==='sources'" />
     </div>
 
     <Jam class="w-80 hidden md:block border-l border-zinc-800" />
@@ -70,6 +71,8 @@ import DjControls from './components/DjControls.vue'
 import { usePlayer } from './stores/player'
 import { useJam } from './stores/jam'
 
+import Sources from './components/Sources.vue'
+
 const tab = ref('library')
 const player = usePlayer()
 const jam = useJam()
@@ -79,6 +82,7 @@ const tabs = [
   { id: 'capsule', label: 'Capsule' },
   { id: 'queue',   label: 'Queue' },
   { id: 'dj',      label: '🎛️ DJ' },
+   { id: 'sources', label: '🌐 Sources' },
 ]
 
 function fmtTime(s) {
