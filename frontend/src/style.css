@@ -7,3 +7,10 @@ html, body, #app {
   background: #09090b;
   color: white;
 }
+
+:root {
+  --brand-1: #8b5cf6;   /* purple */
+  --brand-2: #ec4899;   /* pink   */
+  --brand-3: #f97316;   /* orange */
+  --accent:  #22c55e;   /* green  */
+}

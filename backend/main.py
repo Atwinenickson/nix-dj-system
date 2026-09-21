@@ -365,3 +365,94 @@ def shuffle_tracks(limit: int = 20, genre: Optional[str] = None):
                 "SELECT * FROM tracks ORDER BY RANDOM() LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+    
+    
+
+import io
+from fastapi.responses import Response
+
+@app.get("/api/art/{track_id}")
+def get_art(track_id: int):
+    """Return embedded cover art for a track, or 404."""
+    with db() as conn:
+        row = conn.execute("SELECT path FROM tracks WHERE id=?", (track_id,)).fetchone()
+    if not row:
+        raise HTTPException(404)
+    path = Path(row["path"])
+    if not path.exists():
+        raise HTTPException(404)
+
+    try:
+        audio = MutagenFile(str(path))
+        # Look for common tag keys that hold embedded art
+        if audio is None:
+            raise HTTPException(404)
+
+        tags = getattr(audio, "tags", None)
+        if not tags:
+            raise HTTPException(404)
+
+        pic = None
+        # ID3 (mp3)
+        for key in ("APIC:", "APIC:cover", "APIC:Cover"):
+            if key in tags:
+                pic = tags[key]
+                break
+        # MP4 / M4A
+        if not pic and "covr" in tags:
+            pic = tags["covr"][0]
+        # FLAC
+        if not pic and hasattr(audio, "pictures") and audio.pictures:
+            pic = audio.pictures[0]
+
+        if not pic:
+            raise HTTPException(404)
+
+        data = getattr(pic, "data", None) or bytes(pic)
+        mime = getattr(pic, "mime", None) or "image/jpeg"
+        return Response(content=data, media_type=mime)
+
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(404)
+
+
+@app.get("/api/stats")
+def stats():
+    """Aggregate library stats for the UI header."""
+    with db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+        artists = conn.execute("SELECT COUNT(DISTINCT artist) FROM tracks").fetchone()[0]
+        albums = conn.execute("SELECT COUNT(DISTINCT album) FROM tracks").fetchone()[0]
+        total_sec = conn.execute("SELECT COALESCE(SUM(duration), 0) FROM tracks").fetchone()[0]
+        return {
+            "tracks": total,
+            "artists": artists,
+            "albums": albums,
+            "total_seconds": total_sec,
+        }
+
+
+@app.get("/api/tracks/recent")
+def recent_tracks(limit: int = 12):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tracks ORDER BY added_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get("/api/tracks/top-artists")
+def top_artists(limit: int = 12):
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT artist, COUNT(*) as track_count,
+                   MIN(id) as sample_track_id
+            FROM tracks
+            WHERE artist != 'Unknown' AND artist != ''
+            GROUP BY artist
+            ORDER BY track_count DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
