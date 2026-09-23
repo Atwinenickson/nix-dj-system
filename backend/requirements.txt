@@ -7,3 +7,4 @@ python-multipart
 aiofiles
 httpx>=0.27
 psycopg[binary]>=3.2
+python-dotenv
