@@ -50,6 +50,7 @@ backend/dj.db-shm
 *.sqlite3
 *.db
 *.db-journal
+backend/.env
 
 # ------------------------------------------------------------
 # Music files — NEVER commit audio/video to git

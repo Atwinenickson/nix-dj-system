@@ -140,8 +140,23 @@ def _parse_dirs():
 MUSIC_DIRS = _parse_dirs()
 MUSIC_DIR = MUSIC_DIRS[0] if MUSIC_DIRS else Path("./songs").resolve()
 
-SOURCES_CACHE = Path("source_cache")
-SOURCES_CACHE.mkdir(exist_ok=True)
+import tempfile
+
+# Vercel serverless is read-only except /tmp.
+# Detect via the VERCEL env var it sets automatically.
+if os.getenv("VERCEL"):
+    SOURCES_CACHE = Path("/tmp/source_cache")
+else:
+    SOURCES_CACHE = Path("source_cache")
+
+try:
+    SOURCES_CACHE.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Ultimate fallback — always writable
+    SOURCES_CACHE = Path(tempfile.gettempdir()) / "source_cache"
+    SOURCES_CACHE.mkdir(parents=True, exist_ok=True)
+
+print(f"📁 SOURCES_CACHE = {SOURCES_CACHE}", flush=True)
 
 # ------------------------------------------------------------------
 # FastAPI + CORS
