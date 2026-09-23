@@ -15,6 +15,9 @@ from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from mutagen import File as MutagenFile
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ------------------------------------------------------------------
 # Database driver auto-detection
 # ------------------------------------------------------------------
@@ -289,16 +292,29 @@ def scan_library():
                     )
                     added += 1
 
-        existing = conn.execute("SELECT id, path FROM tracks").fetchall()
-        for row in existing:
-            p = row["path"]
-            if p in seen:
-                continue
-            path_obj = Path(p)
-            in_scope = any(str(path_obj).startswith(str(base) + os.sep) for base in MUSIC_DIRS)
-            if not in_scope or not path_obj.exists():
-                conn.execute("DELETE FROM tracks WHERE id=?", (row["id"],))
-                removed += 1
+        # ---- 2. Prune stale rows ----
+        # Only prune files that belong to the folders we actually scanned.
+        # If we found nothing (e.g. on Vercel with no local dirs), skip pruning entirely.
+        if seen:
+            existing = conn.execute("SELECT id, path FROM tracks").fetchall()
+            for row in existing:
+                p = row["path"]
+                if p in seen:
+                    continue
+                # Only consider rows that could have come from a scanned folder
+                path_obj = Path(p)
+                in_scope = any(
+                    str(path_obj).startswith(str(base) + os.sep) for base in MUSIC_DIRS
+                )
+                # If it's not in scope, leave it alone (URL tracks, another machine's tracks, etc.)
+                if not in_scope:
+                    continue
+                # In scope but file is gone → prune
+                if not path_obj.exists():
+                    conn.execute("DELETE FROM tracks WHERE id=?", (row["id"],))
+                    removed += 1
+        else:
+            print("⏭️  skipped pruning (no folders scanned on this host)", flush=True)
 
     print(f"📚 scan: +{added} new, -{removed} removed", flush=True)
     return {"added": added, "removed": removed}
