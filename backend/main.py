@@ -267,6 +267,7 @@ def _is_audio_file(name: str) -> bool:
 
 
 def scan_library():
+    """Scan MUSIC_DIRS for audio files, update the database, and prune stale rows.""""
     added = 0
     removed = 0
     with db() as conn:
